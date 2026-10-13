@@ -1,0 +1,389 @@
+-- Tool Grabber | Delta Executor
+-- Lists every Tool in Workspace. Tap one -> teleport, pick it up, return to your old spot.
+
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+
+local lp = Players.LocalPlayer
+local genv = (getgenv and getgenv()) or _G
+
+-- remove old copy if re-executed
+if genv.__ToolGrabberCleanup then
+    pcall(genv.__ToolGrabberCleanup)
+end
+
+local fti = firetouchinterest
+
+-- colors
+local BG = Color3.fromRGB(14, 14, 24)
+local ITEM = Color3.fromRGB(32, 32, 54)
+local ACCENT1 = Color3.fromRGB(124, 58, 237)
+local ACCENT2 = Color3.fromRGB(34, 211, 238)
+local GREEN = Color3.fromRGB(34, 197, 94)
+local RED = Color3.fromRGB(239, 68, 68)
+local WHITE = Color3.new(1, 1, 1)
+
+local function new(class, props, parent)
+    local o = Instance.new(class)
+    for k, v in pairs(props) do
+        o[k] = v
+    end
+    if parent then
+        o.Parent = parent
+    end
+    return o
+end
+
+local function getGuiParent()
+    local ok, res = pcall(function()
+        if gethui then
+            return gethui()
+        end
+        return game:GetService("CoreGui")
+    end)
+    if ok and res then
+        return res
+    end
+    return lp:WaitForChild("PlayerGui")
+end
+
+----------------------------------------------------------------
+-- GUI
+----------------------------------------------------------------
+local gui = new("ScreenGui", {
+    Name = "TG_" .. tostring(math.random(100000, 999999)),
+    ResetOnSpawn = false,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    IgnoreGuiInset = true,
+})
+if not pcall(function() gui.Parent = getGuiParent() end) then
+    gui.Parent = lp:WaitForChild("PlayerGui")
+end
+
+local FULL = UDim2.fromOffset(280, 340)
+local MINI = UDim2.fromOffset(280, 42)
+
+local main = new("Frame", {
+    Size = FULL,
+    Position = UDim2.new(0.5, -140, 0.5, -170),
+    BackgroundColor3 = BG,
+    BorderSizePixel = 0,
+    ClipsDescendants = true,
+}, gui)
+new("UICorner", { CornerRadius = UDim.new(0, 14) }, main)
+new("UIStroke", { Color = ACCENT1, Thickness = 1.5, Transparency = 0.2 }, main)
+
+local top = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 42),
+    BackgroundColor3 = WHITE,
+    BorderSizePixel = 0,
+}, main)
+new("UICorner", { CornerRadius = UDim.new(0, 14) }, top)
+new("UIGradient", { Color = ColorSequence.new(ACCENT1, ACCENT2), Rotation = 0 }, top)
+
+local title = new("TextLabel", {
+    BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(14, 0),
+    Size = UDim2.new(1, -90, 1, 0),
+    Font = Enum.Font.GothamBlack,
+    TextSize = 15,
+    TextColor3 = WHITE,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Text = "TOOL GRABBER",
+}, top)
+
+local function topButton(text, xOffset)
+    local b = new("TextButton", {
+        Size = UDim2.fromOffset(28, 28),
+        Position = UDim2.new(1, xOffset, 0, 7),
+        BackgroundColor3 = Color3.new(0, 0, 0),
+        BackgroundTransparency = 0.55,
+        AutoButtonColor = true,
+        Font = Enum.Font.GothamBold,
+        TextSize = 16,
+        TextColor3 = WHITE,
+        Text = text,
+    }, top)
+    new("UICorner", { CornerRadius = UDim.new(0, 8) }, b)
+    return b
+end
+
+local closeBtn = topButton("X", -34)
+local minBtn = topButton("-", -66)
+
+local scroll = new("ScrollingFrame", {
+    Position = UDim2.new(0, 0, 0, 50),
+    Size = UDim2.new(1, 0, 1, -50),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    ScrollBarThickness = 3,
+    ScrollBarImageColor3 = ACCENT2,
+    ScrollingDirection = Enum.ScrollingDirection.Y,
+    CanvasSize = UDim2.new(),
+    AutomaticCanvasSize = Enum.AutomaticSize.Y,
+}, main)
+new("UIPadding", {
+    PaddingLeft = UDim.new(0, 8),
+    PaddingRight = UDim.new(0, 8),
+    PaddingTop = UDim.new(0, 2),
+    PaddingBottom = UDim.new(0, 8),
+}, scroll)
+new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, scroll)
+
+local emptyLabel = new("TextLabel", {
+    Name = "Empty",
+    BackgroundTransparency = 1,
+    Size = UDim2.new(1, 0, 0, 40),
+    Font = Enum.Font.Gotham,
+    TextSize = 14,
+    TextColor3 = Color3.fromRGB(150, 150, 180),
+    Text = "No tools found in Workspace",
+    Visible = false,
+}, scroll)
+
+----------------------------------------------------------------
+-- State / cleanup
+----------------------------------------------------------------
+local dead = false
+local busy = false
+local conns = {}
+local itemConns = {}
+
+local function cleanup()
+    dead = true
+    for _, c in ipairs(conns) do
+        pcall(function() c:Disconnect() end)
+    end
+    for _, c in ipairs(itemConns) do
+        pcall(function() c:Disconnect() end)
+    end
+    pcall(function() gui:Destroy() end)
+end
+genv.__ToolGrabberCleanup = cleanup
+
+closeBtn.Activated:Connect(cleanup)
+
+local minimized = false
+minBtn.Activated:Connect(function()
+    minimized = not minimized
+    minBtn.Text = minimized and "+" or "-"
+    TweenService:Create(main, TweenInfo.new(0.25, Enum.EasingStyle.Quad), {
+        Size = minimized and MINI or FULL,
+    }):Play()
+end)
+
+----------------------------------------------------------------
+-- Dragging (mouse + touch)
+----------------------------------------------------------------
+do
+    local dragging, dragStart, startPos
+    top.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = main.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+    table.insert(conns, UIS.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            local d = input.Position - dragStart
+            main.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + d.X,
+                startPos.Y.Scale, startPos.Y.Offset + d.Y
+            )
+        end
+    end))
+end
+
+----------------------------------------------------------------
+-- Grab logic
+----------------------------------------------------------------
+local function flash(btn, color)
+    if not btn or not btn.Parent then return end
+    btn.BackgroundColor3 = color
+    task.delay(0.45, function()
+        if btn and btn.Parent then
+            TweenService:Create(btn, TweenInfo.new(0.3), { BackgroundColor3 = ITEM }):Play()
+        end
+    end)
+end
+
+local function ownsTool(tool)
+    return tool.Parent == lp.Backpack or tool.Parent == lp.Character
+end
+
+local function grab(tool, btn)
+    if busy or dead then return end
+
+    local char = lp.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not (hrp and hum and hum.Health > 0) then return end
+
+    if not (tool and tool.Parent) then
+        flash(btn, RED)
+        return
+    end
+
+    local handle = tool:FindFirstChild("Handle") or tool:FindFirstChildWhichIsA("BasePart", true)
+    if not handle then
+        flash(btn, RED)
+        return
+    end
+
+    busy = true
+    local backCF = hrp.CFrame -- the spot to return to
+    local t0 = os.clock()
+
+    -- touch the handle until the SERVER gives us the tool (no client-side equip)
+    while os.clock() - t0 < 3 do
+        if not (hrp.Parent and tool.Parent and handle.Parent) then break end
+        if ownsTool(tool) then break end -- stop teleporting the moment we own it
+
+        hrp.CFrame = handle.CFrame
+        hrp.AssemblyLinearVelocity = Vector3.zero
+
+        if fti then
+            pcall(function()
+                fti(hrp, handle, 0)
+                fti(hrp, handle, 1)
+            end)
+        end
+
+        task.wait(0.05)
+    end
+
+    local ok = ownsTool(tool)
+
+    -- let the server settle, then go back and stay there
+    if hrp.Parent then
+        task.wait(0.1)
+        for _ = 1, 3 do
+            if not hrp.Parent then break end
+            hrp.CFrame = backCF
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+            task.wait(0.1)
+        end
+    end
+
+    busy = false
+    flash(btn, ok and GREEN or RED)
+end
+
+----------------------------------------------------------------
+-- Tool list
+----------------------------------------------------------------
+local function valid(tool)
+    if not tool:IsDescendantOf(Workspace) then return false end
+    local p = tool.Parent
+    if p and p:IsA("Model") and Players:GetPlayerFromCharacter(p) then
+        return false -- held by a player
+    end
+    return true
+end
+
+local function collect()
+    local list = {}
+    for _, d in ipairs(Workspace:GetDescendants()) do
+        if d:IsA("Tool") and valid(d) then
+            list[#list + 1] = d
+        end
+    end
+    table.sort(list, function(a, b)
+        return a.Name:lower() < b.Name:lower()
+    end)
+    return list
+end
+
+local pending = false
+local rebuild
+
+local function schedule()
+    if pending or dead then return end
+    pending = true
+    task.delay(0.25, function()
+        pending = false
+        if not dead then
+            rebuild()
+        end
+    end)
+end
+
+rebuild = function()
+    for _, c in ipairs(itemConns) do
+        pcall(function() c:Disconnect() end)
+    end
+    itemConns = {}
+
+    for _, ch in ipairs(scroll:GetChildren()) do
+        if ch.Name == "Item" then
+            ch:Destroy()
+        end
+    end
+
+    local tools = collect()
+    title.Text = "TOOL GRABBER  [" .. #tools .. "]"
+    emptyLabel.Visible = #tools == 0
+
+    for i, tool in ipairs(tools) do
+        local btn = new("TextButton", {
+            Name = "Item",
+            Size = UDim2.new(1, 0, 0, 48),
+            BackgroundColor3 = ITEM,
+            AutoButtonColor = false,
+            Text = "",
+            LayoutOrder = i,
+        }, scroll)
+        new("UICorner", { CornerRadius = UDim.new(0, 10) }, btn)
+
+        new("TextLabel", {
+            BackgroundTransparency = 1,
+            Position = UDim2.fromOffset(12, 6),
+            Size = UDim2.new(1, -24, 0, 22),
+            Font = Enum.Font.GothamBold,
+            TextSize = 15,
+            TextColor3 = WHITE,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            Text = tool.Name,
+        }, btn)
+
+        new("TextLabel", {
+            BackgroundTransparency = 1,
+            Position = UDim2.fromOffset(12, 27),
+            Size = UDim2.new(1, -24, 0, 16),
+            Font = Enum.Font.Gotham,
+            TextSize = 12,
+            TextColor3 = Color3.fromRGB(150, 150, 180),
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            Text = "in: " .. (tool.Parent and tool.Parent.Name or "?"),
+        }, btn)
+
+        btn.Activated:Connect(function()
+            task.spawn(grab, tool, btn)
+        end)
+
+        table.insert(itemConns, tool.AncestryChanged:Connect(schedule))
+    end
+end
+
+table.insert(conns, Workspace.DescendantAdded:Connect(function(d)
+    if d:IsA("Tool") then schedule() end
+end))
+table.insert(conns, Workspace.DescendantRemoving:Connect(function(d)
+    if d:IsA("Tool") then schedule() end
+end))
+
+rebuild()
+                                                         
