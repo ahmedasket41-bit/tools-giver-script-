@@ -224,6 +224,8 @@ local VIM
 pcall(function() VIM = game:GetService("VirtualInputManager") end)
 local GuiService = game:GetService("GuiService")
 
+local learned = nil -- the game's "take" button, learned from one real tap
+
 local function ownsTool(tool)
     return tool.Parent == lp.Backpack or tool.Parent == lp.Character
 end
@@ -336,8 +338,10 @@ end
 ----------------------------------------------------------------
 -- Game GUI pickup button (the "Take" button on the screen)
 ----------------------------------------------------------------
+-- (Arabic words written as \u escapes so copy/paste can never break the file)
 local TAKE_WORDS = { "take", "pick", "grab", "collect", "claim", "equip", "loot", "steal",
-    "اخذ", "أخذ", "خذ", "التقاط", "جمع" }
+    "\u{0627}\u{062E}\u{0630}", "\u{0623}\u{062E}\u{0630}", "\u{062E}\u{0630}",
+    "\u{0627}\u{0644}\u{062A}\u{0642}\u{0627}\u{0637}", "\u{062C}\u{0645}\u{0639}" }
 local BLOCK_WORDS = { "close", "exit", "sell", "buy", "purchase", "shop", "store", "delete",
     "reset", "robux", "gift", "trade", "report", "quit", "leave", "rebirth", "setting" }
 
@@ -348,11 +352,15 @@ local function hasAny(s, words)
     return false
 end
 
+local function layerOf(o)
+    return o:FindFirstAncestorWhichIsA("LayerCollector")
+end
+
 local function isShown(d)
     local cur = d
     while cur and cur ~= game do
         if cur:IsA("GuiObject") and not cur.Visible then return false end
-        if cur:IsA("ScreenGui") and not cur.Enabled then return false end
+        if cur:IsA("LayerCollector") and not cur.Enabled then return false end
         cur = cur.Parent
     end
     return d.AbsoluteSize.X > 0 and d.AbsoluteSize.Y > 0
@@ -371,23 +379,63 @@ local function snapshotButtons()
     return set
 end
 
-local function labelOf(b)
-    local t = b.Name .. " " .. (b.Parent and b.Parent.Name or "")
-    if b:IsA("TextButton") then t = t .. " " .. b.Text end
+local function textsOf(b)
+    local texts = {}
+    if b:IsA("TextButton") and b.Text ~= "" then texts[#texts + 1] = b.Text end
     for _, c in ipairs(b:GetDescendants()) do
-        if c:IsA("TextLabel") or c:IsA("TextButton") then
-            t = t .. " " .. c.Text
+        if (c:IsA("TextLabel") or c:IsA("TextButton")) and c.Text ~= "" then
+            texts[#texts + 1] = c.Text
         end
     end
-    return t:lower()
+    return table.concat(texts, "|")
+end
+
+local function labelOf(b)
+    return (b.Name .. " " .. (b.Parent and b.Parent.Name or "") .. " " .. textsOf(b)):lower()
 end
 
 local function describe(b)
     return b.Name .. (b:IsA("TextButton") and ("[" .. b.Text .. "]") or "")
 end
 
+local function signatureOf(b)
+    local root = layerOf(b)
+    return {
+        class = b.ClassName,
+        name = b.Name,
+        parent = b.Parent and b.Parent.Name or "",
+        root = root and root.Name or "",
+        text = textsOf(b),
+    }
+end
+
+-- the button we learned, found again on screen (works even if the game recreates it)
+local function learnedButtons()
+    local out = {}
+    local pg = lp:FindFirstChildOfClass("PlayerGui")
+    if not (learned and pg) then return out end
+    local sameText, other = {}, {}
+    for _, d in ipairs(pg:GetDescendants()) do
+        if d.Name == learned.name and d.ClassName == learned.class and not d:IsDescendantOf(gui) then
+            local root = layerOf(d)
+            if root and root.Name == learned.root and d.Parent and d.Parent.Name == learned.parent and isShown(d) then
+                if textsOf(d) == learned.text then
+                    sameText[#sameText + 1] = d
+                else
+                    other[#other + 1] = d
+                end
+            end
+        end
+    end
+    for i = 1, math.min(#sameText, 2) do out[#out + 1] = sameText[i] end
+    if #out == 0 then
+        for i = 1, math.min(#other, 2) do out[#out + 1] = other[i] end
+    end
+    return out
+end
+
 -- buttons that look like "take" + buttons that just appeared because we got near the item
-local function pickupButtons(before)
+local function guessButtons(before)
     local now = snapshotButtons()
     local keyword, fresh = {}, {}
     for b in pairs(now) do
@@ -406,16 +454,24 @@ local function pickupButtons(before)
     return out
 end
 
+local function pickupButtons(before)
+    if learned then
+        return learnedButtons()
+    end
+    return guessButtons(before)
+end
+
 local function guiCenter(b)
     local pos = b.AbsolutePosition + b.AbsoluteSize / 2
-    local sg = b:FindFirstAncestorOfClass("ScreenGui")
-    if not (sg and sg.IgnoreGuiInset) then
+    local root = layerOf(b)
+    if root and root:IsA("ScreenGui") and not root.IgnoreGuiInset then
         pos = pos + (GuiService:GetGuiInset())
     end
     return pos
 end
 
 local function connPress(b, hold)
+    if not b:IsA("GuiButton") then return end
     local function fire(ev)
         local fired = false
         if getconnections then
@@ -461,12 +517,59 @@ local function pressButton(b, hold)
     end)
 end
 
+-- Learn mode: stay at the item and wait for ONE real tap on the game's take button
+local function learnWindow(tool, handle, hrp, got)
+    local oldTitle = title.Text
+    title.Text = "TAP THE TAKE BUTTON NOW"
+
+    local conn
+    conn = UIS.InputBegan:Connect(function(input)
+        if learned then return end
+        if input.UserInputType ~= Enum.UserInputType.Touch
+            and input.UserInputType ~= Enum.UserInputType.MouseButton1 then
+            return
+        end
+        local pg = lp:FindFirstChildOfClass("PlayerGui")
+        if not pg then return end
+        local okq, objs = pcall(function()
+            return pg:GetGuiObjectsAtPosition(input.Position.X, input.Position.Y)
+        end)
+        if not (okq and objs) then return end
+
+        local pick
+        for _, o in ipairs(objs) do
+            local root = layerOf(o)
+            if root and root.Name ~= "TouchGui" and not o:IsDescendantOf(gui) then
+                if o:IsA("GuiButton") then
+                    pick = o
+                    break
+                end
+                if not pick then pick = o end
+            end
+        end
+        if pick then
+            learned = signatureOf(pick)
+            print("[ToolGrabber] learned take button: " .. learned.root .. " > " .. learned.parent .. " > " .. learned.name)
+            title.Text = "LEARNED!"
+        end
+    end)
+
+    local t0 = os.clock()
+    while os.clock() - t0 < 12 and not got() do
+        if not (hrp.Parent and tool.Parent and handle.Parent) then break end
+        hrp.CFrame = handle.CFrame
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        task.wait(0.05)
+    end
+
+    conn:Disconnect()
+    title.Text = oldTitle
+end
+
 ----------------------------------------------------------------
 -- Grab
 ----------------------------------------------------------------
-local function grab(tool, btn)
-    if busy or dead then return end
-
+local function grabInner(tool, btn)
     local char = lp.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -483,11 +586,11 @@ local function grab(tool, btn)
         return
     end
 
-    busy = true
     local backCF = hrp.CFrame -- the spot to return to
     local name = tool.Name
     local before = countNamed(name)
-    local guiBefore = snapshotButtons() -- buttons visible BEFORE we get near the item
+    local okSnap, guiBefore = pcall(snapshotButtons) -- buttons visible BEFORE we get near the item
+    if not okSnap then guiBefore = {} end
     local changed = {}
     local seenCount = 0
     local triedButtons = {}
@@ -505,8 +608,10 @@ local function grab(tool, btn)
             CFrame.new(1.5, 0, 0),
         }
         local limbNames = { "RightHand", "Right Arm", "LeftHand", "Left Arm", "Head" }
+        -- button already learned: try all 4 spots. Not learned yet: 2 quick tries, then learn mode.
+        local maxAttempts = learned and #offsets or 2
 
-        for attempt = 1, #offsets do
+        for attempt = 1, maxAttempts do
             local t1 = os.clock()
             local lastTrigger = 0
             -- odd attempts = quick tap, even attempts = long press
@@ -561,6 +666,11 @@ local function grab(tool, btn)
             if got() or not (hrp.Parent and tool.Parent and handle.Parent) then break end
         end
 
+        -- nothing worked and we don't know the button yet: let the player tap it once
+        if not got() and not learned and hrp.Parent and tool.Parent and handle.Parent then
+            learnWindow(tool, handle, hrp, got)
+        end
+
         -- the game may delete the world copy and give a clone: wait a moment for it
         if not got() and not tool.Parent then
             local t2 = os.clock()
@@ -594,8 +704,23 @@ local function grab(tool, btn)
     print(string.format("[ToolGrabber] %s -> %s | prompts/clicks: %d | screen buttons pressed: %s",
         name, ok and "TAKEN" or "FAILED", seenCount, #names > 0 and table.concat(names, ", ") or "none"))
 
-    busy = false
+    -- a learned button that did not work gets forgotten, so the next try can learn again
+    if learned and not ok then
+        learned = nil
+    end
+
     flash(btn, ok and GREEN or RED)
+end
+
+local function grab(tool, btn)
+    if busy or dead then return end
+    busy = true
+    local okRun, err = pcall(grabInner, tool, btn)
+    busy = false -- never stays stuck, even if something errors
+    if not okRun then
+        warn("[ToolGrabber] " .. tostring(err))
+        flash(btn, RED)
+    end
 end
 
 ----------------------------------------------------------------
@@ -627,8 +752,8 @@ local pending = false
 local rebuild
 
 local function schedule()
-    if pending or dead then return
-pending = true
+    if pending or dead then return end
+    pending = true
     task.delay(0.25, function()
         pending = false
         if not dead then
