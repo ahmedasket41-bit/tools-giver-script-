@@ -386,4 +386,3 @@ table.insert(conns, Workspace.DescendantRemoving:Connect(function(d)
 end))
 
 rebuild()
-                                                         
